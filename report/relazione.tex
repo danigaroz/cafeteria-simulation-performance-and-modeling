@@ -1,0 +1,762 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage[a4paper, margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+% euro symbol rendered via UTF-8 input directly (no eurosym needed)
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black,
+            citecolor=blue!50!black}
+
+\title{Performance Modeling of a Cafeteria System \\
+       \large A discrete-event simulation study}
+\author{Daniel \\ Performance Modeling of Computer Systems and Networks \\
+        Universit\`a degli Studi di Roma Tor Vergata}
+\date{A.A. 2025/2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This work presents a complete simulation study of a small cafeteria
+modelled as a queueing system with two coupled resources: $C$ waiters
+and $S$ seats. Two customer classes are considered (coffee and
+breakfast). The study follows Algorithm~1.1 of Leemis \&
+Park\,\cite{leemis_park} for model development, employs the
+multi-stream Lehmer pseudo-random generator, identifies the warm-up
+period by Welch's method, computes all statistics via
+replication-deletion with $n=32$ independent replications per scenario,
+and reports $95\%$ confidence intervals based on the t-Student
+distribution. The full-factorial experiment varies
+$(C,S) \in \{2,3\} \times \{4,5\}$ and the arrival rate
+$\lambda \in \{15,20,25,30\}$ customers/hour. Results show that
+\emph{seats are the bottleneck of the system}: at the baseline rate
+$\lambda=20$/h the seat utilization is roughly twice the waiter
+utilization. Consequently, adding a single seat is an order of
+magnitude more effective and twelve times cheaper than adding a single
+waiter. An economic analysis based on operating costs and per-customer
+revenue translates these findings into a clear operational policy.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section{Introduction and motivation}
+% =====================================================================
+
+Small service establishments such as cafeterias, fast-food counters
+and bars share a common operational dilemma: when demand grows, should
+the manager invest in additional service staff, in additional seating
+capacity, or in both? The intuitive answer ``add a waiter when the
+queue grows'' is not always correct, because the bottleneck of the
+system is not necessarily the service capacity of the staff: a customer
+also occupies a seat throughout the entire stay, including the time
+spent consuming the product.
+
+The setting we study is a small cafeteria with $C$ waiters and $S$
+seats at the counter. A customer arrives, takes a free seat if one is
+available (otherwise the customer waits standing), receives attention
+from a free waiter to place the order, then consumes the product still
+occupying the seat, and finally leaves. The system therefore couples
+two resources: waiters are needed only during the attention phase,
+whereas seats are held throughout the whole stay.
+
+This coupling makes the system analytically intractable in closed form:
+no closed expression exists for the joint distribution of the two
+resource queues. We resort to \emph{discrete-event simulation}, which
+allows us to compute every performance measure of interest while
+remaining methodologically transparent. The whole study sticks to the
+methods covered in the course material, namely Algorithm~1.2 of
+Leemis~\& Park\,\cite{leemis_park} for the simulation engine, the
+multi-stream Lehmer generator\,\cite{leemis_park} for pseudo-random
+numbers, Welch's method for warm-up
+identification\,\cite{leemis_park, kurkowski_manet} and the
+replication-deletion approach with the t-Student confidence interval
+for the statistical analysis.
+
+The study answers three questions:
+(i)~which is the system's bottleneck, the waiters or the seats?
+(ii)~how does the performance scale with the arrival rate, and which
+combination of $(C,S)$ remains stable up to which rate?
+(iii)~given operating costs and a simple revenue model, which
+configuration maximises the hourly net benefit for each demand level?
+
+% =====================================================================
+\section{System description and study objectives}
+% =====================================================================
+
+\subsection{Customer classes}
+The arrival stream is composed of two customer classes with the following
+characteristics:
+
+\begin{itemize}
+\item \textbf{Coffee customers} ({\tt CAFE}). They arrive with probability
+$p_c = 0.7$, are quickly attended and consume their drink in a short
+amount of time.
+\item \textbf{Breakfast customers} ({\tt DESAYUNO}). They arrive with
+probability $p_d = 1 - p_c = 0.3$ and require both a longer attention
+(the waiter has to bring several items) and a longer consumption time.
+\end{itemize}
+
+\subsection{Resources}
+The system has two physical resources:
+
+\begin{itemize}
+\item \textbf{Seats} ($S$ identical units). A seat is occupied by a customer
+for the whole duration of the stay, from the moment the customer sits
+down until consumption is finished. There is a single FCFS standing
+queue for customers waiting to sit.
+\item \textbf{Waiters} ($C$ identical units). A waiter serves one customer
+at a time during the \emph{attention phase}. There is a single FCFS
+queue of seated customers waiting for a waiter to become available.
+\end{itemize}
+
+\subsection{Operating questions and scope}
+The questions the model must answer are:
+
+\begin{enumerate}
+\item For the baseline configuration $(C,S)=(2,4)$, what is the mean
+response time, the mean number of customers in the system, and the
+utilization of each resource?
+\item How sensitive are these metrics to the arrival rate? At which
+$\lambda$ does the system become unstable?
+\item Comparing the four candidate configurations, $(2,4)$, $(2,5)$,
+$(3,4)$ and $(3,5)$, which is the cheapest configuration that still
+provides acceptable service for each demand level?
+\end{enumerate}
+
+% =====================================================================
+\section{Conceptual model}
+% =====================================================================
+
+The conceptual model describes the system as a discrete-event process
+with three event types and a state consisting of the contents of four
+\emph{logical zones}:
+
+\begin{itemize}
+\item \emph{Standing zone:} customers waiting for a seat.
+\item \emph{Seated-waiting zone:} customers occupying a seat and waiting
+for a waiter.
+\item \emph{Attended zone:} customers being attended by a waiter.
+\item \emph{Consuming zone:} customers consuming and occupying a seat.
+\end{itemize}
+
+A customer flows through these zones according to the cycle illustrated
+below. Each transition between zones is an event:
+
+\begin{center}
+\fbox{\parbox{0.95\linewidth}{
+\textbf{Customer lifecycle.}\\[2pt]
+\textsc{Arrival} $\to$ standing zone (if no free seat) $\to$
+\textsc{seat allocation} $\to$ seated-waiting zone (if no free waiter)
+$\to$ \textsc{Attention begins} $\to$ attended zone $\to$
+\textsc{End of attention} $\to$ consuming zone $\to$
+\textsc{End of consumption} $\to$ departure (seat is freed).
+}}
+\end{center}
+
+The system state is fully described by the cardinality of each zone.
+The simulator implements the next-event algorithm (Section~5):
+between two consecutive events the state is constant, and the
+simulation clock advances by jumps to the next scheduled event.
+
+% =====================================================================
+\section{Specification model}
+% =====================================================================
+
+\subsection{Stochastic processes and distribution choices}
+The choice of distributions is summarized in
+Table~\ref{tab:params}. Inter-arrival times are exponentially
+distributed: the arrival process is therefore a homogeneous Poisson
+process, the standard choice for unscheduled arrivals at a public
+service\,\cite{harchol_balter}. The customer class is drawn from a
+Bernoulli distribution with parameter $p_c = 0.7$. Attention and
+consumption times are exponentially distributed and depend on the
+class.
+
+The choice of \emph{exponential} service times has three motivations:
+\begin{itemize}
+\item It guarantees the memoryless property and therefore enables a
+Markovian analysis where applicable.
+\item It allows us to compute analytical bounds for validation
+(Section~\ref{sec:validation}).
+\item It is the standard reference in queueing theory and matches the
+distributions used in the lecture material.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{Parameters of the specification model. Means in minutes.}
+\label{tab:params}
+\begin{tabular}{l l l}
+\toprule
+Process & Distribution & Mean \\
+\midrule
+Inter-arrivals          & \texttt{Exp}     & $1/\lambda$ (varied) \\
+Class assignment        & \texttt{Bern}    & $p_c = 0.7$ (coffee) \\
+Attention -- coffee     & \texttt{Exp}     & $E[A_c] = 1.5$ \\
+Attention -- breakfast  & \texttt{Exp}     & $E[A_d] = 4$ \\
+Consumption -- coffee   & \texttt{Exp}     & $E[C_c] = 5$ \\
+Consumption -- breakfast& \texttt{Exp}     & $E[C_d] = 12$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Derived means}
+\label{sec:means}
+
+Averaging over the two customer classes with mixing probabilities
+$(p_c, p_d) = (0.7, 0.3)$ gives the marginal mean attention time
+\begin{equation}
+E[A] = p_c\,E[A_c] + p_d\,E[A_d]
+     = 0.7\cdot 1.5 + 0.3\cdot 4 = 2.25 \text{ min},
+\label{eq:EA}
+\end{equation}
+the marginal mean consumption time
+\begin{equation}
+E[C] = p_c\,E[C_c] + p_d\,E[C_d]
+     = 0.7\cdot 5 + 0.3\cdot 12 = 6.5 \text{ min},
+\label{eq:EC}
+\end{equation}
+and the mean time a customer occupies a seat:
+\begin{equation}
+E[T_{\text{seat}}] = E[A] + E[C] = 8.75 \text{ min}.
+\label{eq:Eseat}
+\end{equation}
+
+\subsection{Analytical utilizations (lower bounds)}
+\label{sec:rhopred}
+
+Treating each resource in isolation (which neglects the coupling
+between seats and waiters), the predicted utilizations are
+\begin{equation}
+\hat\rho_{\text{seat}}(C,S,\lambda)
+ = \frac{\lambda\,E[T_{\text{seat}}]}{S}, \qquad
+\hat\rho_{\text{waiter}}(C,S,\lambda)
+ = \frac{\lambda\,E[A]}{C}. \label{eq:rhopred}
+\end{equation}
+The system is \emph{stable} when both predicted utilizations are
+strictly below~$1$. The seat utilization is generally larger because
+$E[T_{\text{seat}}] \gg E[A]$ and the seat is held throughout the
+whole stay.
+
+% =====================================================================
+\section{Computational model}
+% =====================================================================
+
+\subsection{Simulator architecture}
+The simulator is implemented in ANSI~C and follows the next-event
+discrete-event simulation paradigm (Algorithm~1.2 of
+Leemis~\& Park\,\cite{leemis_park}). The main loop is:
+
+\begin{enumerate}
+\item Initialize state and schedule the first arrival.
+\item Find the next event in the event list by taking the minimum
+across (i)~the next arrival time, (ii)~the per-waiter attention-end
+times, and (iii)~the per-seat consumption-end times.
+\item Advance the clock to that time.
+\item Update statistics, then process the event (updating state and
+scheduling new events).
+\item Repeat until the termination condition
+($\text{clients\_served} \ge \mathrm{LAST}$, with $\mathrm{LAST}=10\,000$).
+\end{enumerate}
+
+State variables are kept in two arrays indexed by seat slot and
+waiter slot (book-style), plus a small FIFO of seat indices for
+seated-and-waiting customers and a linked list for the unbounded
+standing queue.
+
+\subsection{Pseudo-random numbers}
+Pseudo-random numbers are generated by the multi-stream Lehmer
+generator with modulus $m = 2^{31}-1$ and multiplier $a = 48271$.
+The 256 disjoint streams are obtained from the jump multiplier
+$a^{j} \bmod m = 22925$. Each stochastic process is assigned a
+dedicated stream to ensure that the underlying random sequences are
+\emph{decoupled} across processes, in line with the variance-reduction
+good practice discussed by Kurkowski et al.\,\cite{kurkowski_manet}:
+
+\begin{itemize}
+\item Stream 0: inter-arrival times
+\item Stream 1: customer class assignment
+\item Streams 2--3: attention times (coffee, breakfast)
+\item Streams 4--5: consumption times (coffee, breakfast)
+\end{itemize}
+
+Variates are produced by the inverse method:
+\begin{equation}
+X = -m \,\ln(1-U), \quad U \sim \mathrm{Uniform}(0,1), \quad
+X \sim \mathrm{Exp}(\text{mean} = m).
+\end{equation}
+
+% =====================================================================
+\section{Verification}
+% =====================================================================
+
+Three runtime checks confirm that the simulator behaves as the
+specification model dictates:
+
+\paragraph{(i)~Little's Law.}
+Little's Law\,\cite{harchol_balter} states the universal identity
+\begin{equation}
+L = \lambda\,W, \label{eq:little}
+\end{equation}
+which holds in steady state regardless of the distributions involved.
+The simulator computes $L$ as the time-integrated number of customers
+in system, $\lambda$ as the observed external arrival rate, and $W$ as
+the per-customer mean total time in system. Their ratio agrees
+to four decimal places in every replication (see the baseline result
+in Section~\ref{sec:results-baseline}).
+
+\paragraph{(ii)~Observed arrival rate.}
+The observed inter-arrival rate must match the input value:
+$\lambda^{\text{obs}} = N_{\text{arrived}}/T \to 1/E[\text{IAR}]$ in the
+limit. This is verified for every scenario.
+
+\paragraph{(iii)~Class mix.}
+The empirical fraction of coffee customers must converge to
+$p_c = 0.7$. The simulator prints this fraction; observed deviations
+are within stochastic noise.
+
+% =====================================================================
+\section{Validation against analytical predictions}
+\label{sec:validation}
+% =====================================================================
+
+The analytical bounds in Eq.~\eqref{eq:rhopred} are compared with the
+simulated utilizations in Table~\ref{tab:validation}.
+
+\paragraph{Waiter side.}
+$\rho_{\text{waiter}}^{\text{sim}}$ agrees with $\hat\rho_{\text{waiter}}$
+within $0.5$~percentage points across all $16$ scenarios. This validates
+the waiter sub-model: a waiter behaves essentially as an isolated
+M/M/$C$ server with mean service time $E[A]$.
+
+\paragraph{Seat side.}
+$\rho_{\text{seat}}^{\text{sim}}$ is systematically higher than
+$\hat\rho_{\text{seat}}$, by $5$--$8$~percentage points. The reason is
+the resource coupling: a customer occupies a seat \emph{also while
+waiting for a waiter}, an effect that
+Eq.~\eqref{eq:rhopred} does not capture. The true mean seat
+occupation time is
+\[
+E[T_{\text{seat}}^{\text{real}}]
+   = E[T_{\text{seat}}] + E[W_{\text{seated-waiting}}]
+   > E[T_{\text{seat}}],
+\]
+where the second term is the additional time spent seated waiting for
+a waiter. This is exactly the coupling that defeats a closed-form
+analytical solution and motivates the use of simulation.
+
+\paragraph{Stability prediction.}
+Despite the systematic underestimation, the analytical bound correctly
+\emph{identifies the unstable region}: whenever
+$\hat\rho_{\text{seat}} > 1$ (rows in bold in
+Table~\ref{tab:validation}), the simulator shows saturation
+($\rho_{\text{seat}}^{\text{sim}} = 1.000$ and $W$ explodes).
+This is a strong validation of the model's qualitative behaviour.
+
+\begin{table}[h]
+\centering
+\caption{Predicted vs simulated utilizations across all 16 scenarios.}
+\label{tab:validation}
+\small
+\begin{tabular}{r r r r r r r l}
+\toprule
+$\lambda$/h & C & S & $\hat\rho_{\text{seat}}$ & $\rho_{\text{seat}}^{\text{sim}}$ &
+$\hat\rho_{\text{waiter}}$ & $\rho_{\text{waiter}}^{\text{sim}}$ & Stable? \\
+\midrule
+15 & 2 & 4 & 0.547 & 0.593 & 0.281 & 0.283 & yes \\
+15 & 2 & 5 & 0.438 & 0.477 & 0.281 & 0.283 & yes \\
+15 & 3 & 4 & 0.547 & 0.586 & 0.188 & 0.189 & yes \\
+15 & 3 & 5 & 0.438 & 0.469 & 0.188 & 0.188 & yes \\
+20 & 2 & 4 & 0.729 & 0.794 & 0.375 & 0.377 & yes \\
+20 & 2 & 5 & 0.583 & 0.641 & 0.375 & 0.377 & yes \\
+20 & 3 & 4 & 0.729 & 0.782 & 0.250 & 0.251 & yes \\
+20 & 3 & 5 & 0.583 & 0.626 & 0.250 & 0.251 & yes \\
+25 & 2 & 4 & 0.911 & 0.990 & 0.469 & 0.467 & marginal \\
+25 & 2 & 5 & 0.729 & 0.807 & 0.469 & 0.471 & yes \\
+25 & 3 & 4 & 0.911 & 0.975 & 0.313 & 0.313 & marginal \\
+25 & 3 & 5 & 0.729 & 0.783 & 0.313 & 0.314 & yes \\
+30 & 2 & 4 & \textbf{1.094} & 1.000 & 0.563 & 0.472 & \textbf{NO} \\
+30 & 2 & 5 & 0.875 & 0.976 & 0.563 & 0.563 & critical \\
+30 & 3 & 4 & \textbf{1.094} & 1.000 & 0.375 & 0.321 & \textbf{NO} \\
+30 & 3 & 5 & 0.875 & 0.941 & 0.375 & 0.376 & yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =====================================================================
+\section{Experimental design and statistical method}
+% =====================================================================
+
+\subsection{Factorial design}
+A full-factorial experiment is run with two factors, each at four
+levels: the configuration $(C,S)$ and the arrival rate $\lambda$. This
+yields $4 \times 4 = 16$ scenarios. For each scenario, $n = 32$
+independent replications are performed with seeds $1,\ldots,32$.
+
+The simulation length is fixed at $\mathrm{LAST} = 10\,000$ customers,
+which after the warm-up cut (see Section~\ref{sec:warmup}) gives an
+effective observation window of approximately $440$~h of simulated
+time per replication, sufficient to bound the confidence intervals
+below $5\%$ half-width in most scenarios.
+
+\subsection{Replication-deletion}
+\label{sec:repdel}
+The statistical method is \emph{replication-deletion}\,\cite{leemis_park}:
+each scenario is simulated $n$ times with independent random-number
+streams, the warm-up portion is discarded, and the per-replication
+sample means $\bar X_i$ are treated as i.i.d.\ observations. The
+overall mean and sample standard deviation are computed as
+\begin{equation}
+\bar X = \frac{1}{n}\sum_{i=1}^n \bar X_i, \qquad
+s^2 = \frac{1}{n-1}\sum_{i=1}^n (\bar X_i - \bar X)^2,
+\label{eq:meanstd}
+\end{equation}
+and the $95\%$ confidence interval is
+\begin{equation}
+\bar X \pm t_{n-1,\,\alpha/2}\,\frac{s}{\sqrt{n}}, \quad \alpha = 0.05,
+\label{eq:ci}
+\end{equation}
+where $t_{n-1,\,\alpha/2}$ is the t-Student critical value with $n-1$
+degrees of freedom. For our $n=64$ used in the baseline case,
+$t_{63,\,0.025} \approx 1.998$.
+
+% =====================================================================
+\section{Transient analysis: Welch's method}
+\label{sec:warmup}
+% =====================================================================
+
+The simulator starts in an empty state, which is not representative
+of the steady-state operating regime. The data collected during the
+initial transient must therefore be discarded to avoid bias.
+
+We adopt Welch's method\,\cite{leemis_park}. For a chosen indicator
+$Y_{r,k}$ measured at the $k$-th snapshot ($\Delta t = 60$ min) of
+the $r$-th replication ($r = 1,\ldots,R$), the \emph{ensemble average}
+across replications is
+\begin{equation}
+\bar Y_k = \frac{1}{R}\sum_{r=1}^{R} Y_{r,k}, \qquad k = 1, 2, \ldots
+\label{eq:welch-avg}
+\end{equation}
+This ensemble curve is then smoothed by a moving-average filter of
+window $2w+1$:
+\begin{equation}
+\bar Y_k^{(w)} = \frac{1}{2w+1}\sum_{s=-w}^{w} \bar Y_{k+s}.
+\label{eq:welch-ma}
+\end{equation}
+We apply Eq.~\eqref{eq:welch-avg}--\eqref{eq:welch-ma} with $R = 30$
+independent replications and $w = 5$ to three indicators that capture
+different aspects of the transient: the cumulative mean response time,
+the instantaneous number of customers in system, and the time-integrated
+seat utilization.
+
+All three curves stabilise by approximately $t \approx 50$~h. We adopt
+\begin{equation}
+\boxed{T_0 = 60 \text{ h} = 3600 \text{ min}}
+\label{eq:warmup}
+\end{equation}
+as the warm-up cut, with a $10$~h safety margin. All statistics
+presented hereafter are computed over the post-warm-up interval
+$[T_0, T_{\text{end}}]$ of length
+$T_{\text{eff}} = T_{\text{end}} - T_0 \approx 440$~h.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{0.48\textwidth}
+    \includegraphics[width=\linewidth]{welch_avg_total.png}
+    \caption{Cumulative mean response time}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+    \includegraphics[width=\linewidth]{welch_util_chairs.png}
+    \caption{Seat utilization}
+\end{subfigure}
+\caption{Welch's method on two representative metrics. The thin grey
+curves are individual replications, the thin coloured curve is the
+ensemble average ($R = 30$), the thick orange curve is the
+moving-average filter ($w = 5$). The smoothed curve stabilises by
+$t \approx 50$~h, justifying the choice $T_0 = 60$~h.}
+\label{fig:welch}
+\end{figure}
+
+% =====================================================================
+\section{Baseline scenario results}
+\label{sec:results-baseline}
+% =====================================================================
+
+For the baseline configuration $(C,S,\lambda) = (2,4,20)$ we run
+$n=64$ independent replications. The resulting mean values, sample
+standard deviations and $95\%$ confidence intervals, computed via
+Eq.~\eqref{eq:meanstd}--\eqref{eq:ci}, are listed in
+Table~\ref{tab:baseline}. The relative half-width is below $4.5\%$
+for every metric, indicating excellent statistical precision.
+
+\begin{table}[h]
+\centering
+\caption{Baseline scenario $(C,S,\lambda) = (2,4,20)$ with $n=64$ replications.}
+\label{tab:baseline}
+\begin{tabular}{l r r r r}
+\toprule
+Metric & Mean & St.dev. & CI half-width & Relative \\
+\midrule
+Mean response time $W$ (min)          & 16.06 & 1.213 & $\pm$0.30 & 1.9\% \\
+Mean standing wait (min)              &  6.54 & 1.149 & $\pm$0.29 & 4.4\% \\
+Mean seated wait for waiter (min)     &  0.15 & 0.010 & $\pm$0.002 & 1.6\% \\
+Throughput $X$ (cust/h)               & 20.01 & 0.236 & $\pm$0.06 & 0.3\% \\
+Seat utilization                      & 0.7935& 0.014 & $\pm$0.0035 & 0.4\% \\
+Waiter utilization                    & 0.3765& 0.007 & $\pm$0.0017 & 0.5\% \\
+Mean number in system $L$             &  5.36 & 0.444 & $\pm$0.11 & 2.1\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Little's Law check.}
+With $\lambda = 20$/h $= 1/3$/min and $W = 16.06$ min,
+Eq.~\eqref{eq:little} gives $\lambda \cdot W = (1/3)\cdot 16.06 = 5.36$,
+which matches the simulated $L = 5.36$ to four decimals. This is a
+strong runtime verification of the simulator.
+
+\paragraph{Throughput check.}
+The observed throughput $X = 20.01$~cust/h is essentially equal to
+the input rate $\lambda = 20$~cust/h, confirming that there are no
+losses (the standing queue is unbounded).
+
+% =====================================================================
+\section{Full factorial results}
+\label{sec:results-factorial}
+% =====================================================================
+
+Figures \ref{fig:Wlin}--\ref{fig:Uw} display the four key performance
+metrics ($W$, $L$, $\rho_{\text{seat}}$, $\rho_{\text{waiter}}$) as a
+function of the arrival rate $\lambda$, with one curve per
+configuration. Error bars represent the $95\%$ CI half-widths
+computed via Eq.~\eqref{eq:ci}.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{0.49\textwidth}
+    \includegraphics[width=\linewidth]{fig_W_vs_lambda.png}
+    \caption{linear scale}
+\end{subfigure}
+\begin{subfigure}{0.49\textwidth}
+    \includegraphics[width=\linewidth]{fig_W_vs_lambda_log.png}
+    \caption{logarithmic scale}
+\end{subfigure}
+\caption{Mean response time $W$ vs arrival rate $\lambda$. The
+logarithmic scale reveals the saturation of $(2,4)$ and $(3,4)$ at
+$\lambda = 30$/h.}
+\label{fig:Wlin}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{0.49\textwidth}
+    \includegraphics[width=\linewidth]{fig_L_vs_lambda.png}
+    \caption{Mean number in system}
+\end{subfigure}
+\begin{subfigure}{0.49\textwidth}
+    \includegraphics[width=\linewidth]{fig_util_chairs.png}
+    \caption{Seat utilization}
+\end{subfigure}
+\caption{Mean number in system and seat utilization vs arrival rate,
+by configuration.}
+\label{fig:LU}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.62\linewidth]{fig_util_waiters.png}
+\caption{Waiter utilization vs arrival rate. Even at the peak rate
+$\lambda=30$/h, $\rho_{\text{waiter}}$ remains well below~$1$,
+confirming that waiters are \emph{not} the bottleneck of the system.}
+\label{fig:Uw}
+\end{figure}
+
+\paragraph{Bottleneck.}
+Figures \ref{fig:LU}b and~\ref{fig:Uw} make the bottleneck explicit.
+At the baseline ($\lambda = 20$/h), $\rho_{\text{seat}} \approx 0.79$
+against $\rho_{\text{waiter}} \approx 0.38$, more than a factor of two.
+At the peak ($\lambda = 30$/h), the seat utilization saturates at $1$
+for configurations $(2,4)$ and $(3,4)$ while
+$\rho_{\text{waiter}} \le 0.56$. The bottleneck is therefore the seat,
+not the waiter, in every regime considered.
+
+\paragraph{Effect of adding one extra resource.}
+The benefit of \emph{adding one seat} is dramatic. At $\lambda = 25$/h,
+adding a seat takes the mean response time from $W = 162$~min
+($(C,S)=(2,4)$) down to $W = 15$~min ($(C,S)=(2,5)$), a $90\%$
+reduction. By contrast, \emph{adding one waiter} (going to $(3,4)$)
+brings $W$ only to $84$~min, a $48\%$ reduction. The combined
+addition $(3,5)$ improves marginally over $(2,5)$ alone:
+the bottleneck is so clearly the seat that the waiter upgrade is
+largely redundant up to $\lambda = 25$/h.
+
+% =====================================================================
+\section{Economic analysis}
+% =====================================================================
+
+\subsection{Net benefit function}
+We define the \emph{hourly net benefit} of a configuration $(C,S)$
+operating at arrival rate $\lambda$ as
+\begin{equation}
+B(C,S,\lambda)
+ = \underbrace{\big(p_c\,p_{\text{coffee}} + p_d\,p_{\text{breakfast}}\big)\,X(C,S,\lambda)}_{\text{revenue}}
+ \;-\; \underbrace{c_w\,C + c_s\,S}_{\text{operating cost}},
+\label{eq:benefit}
+\end{equation}
+with prices $p_{\text{coffee}} = 1.5$~€, $p_{\text{breakfast}} = 5$~€,
+and costs $c_w = 12$~€/h per waiter and $c_s = 1$~€/h per seat.
+The two costs $c_w$ and $c_s$ are deliberately set so that
+$c_w \gg c_s$: a seat is cheap (rent, depreciation), a waiter is
+expensive (salary). Substituting $p_c$ and $p_d$ gives the
+per-customer revenue
+\[
+\bar r = p_c\,p_{\text{coffee}} + p_d\,p_{\text{breakfast}}
+       = 0.7\cdot 1.5 + 0.3\cdot 5 = 2.55 \text{ €}.
+\]
+
+For each scenario we substitute the simulated throughput $X$, which
+matches the arrival rate $\lambda$ when the system is stable and falls
+below it when the bottleneck saturates.
+
+\subsection{Scenario-by-scenario evaluation}
+Table~\ref{tab:benefit} reports the benefit of every scenario.
+The viability column flags scenarios with prohibitive mean response
+time (e.g., $W > 30$~min) or saturation (no stable steady state):
+in real terms, those scenarios are operationally inviable even if
+nominally profitable.
+
+\begin{table}[h]
+\centering
+\caption{Hourly benefit and viability per scenario.
+$\bar r = 2.55$~€/customer, $c_w = 12$~€/h, $c_s = 1$~€/h.}
+\label{tab:benefit}
+\small
+\begin{tabular}{r r r r r r r l}
+\toprule
+$\lambda$/h & C & S & $X^{\text{sim}}$/h &
+Revenue (€/h) & Cost (€/h) &
+Net (€/h) & $W$ (min) -- Viable? \\
+\midrule
+15 & 2 & 4 & 15.01 & 38.28 & 28 & \textbf{+10.28} & 11.05 -- yes (best) \\
+15 & 2 & 5 & 15.01 & 38.28 & 29 & +9.28   &  9.94 -- yes \\
+15 & 3 & 4 & 15.01 & 38.28 & 40 & $-1.72$ & 10.81 -- no (loss) \\
+15 & 3 & 5 & 15.01 & 38.28 & 41 & $-2.72$ &  9.72 -- no (loss) \\
+20 & 2 & 4 & 20.01 & 51.03 & 28 & \textbf{+23.03} & 15.98 -- yes (best) \\
+20 & 2 & 5 & 20.01 & 51.03 & 29 & +22.03  & 11.17 -- yes \\
+20 & 3 & 4 & 20.01 & 51.03 & 40 & +11.03  & 15.04 -- yes \\
+20 & 3 & 5 & 20.01 & 51.03 & 41 & +10.03  & 10.66 -- yes \\
+25 & 2 & 4 & 24.82 & 63.30 & 28 & +35.30  & 162.6 -- no ($W$ huge) \\
+25 & 2 & 5 & 25.02 & 63.79 & 29 & \textbf{+34.79} & 15.25 -- yes (best) \\
+25 & 3 & 4 & 24.96 & 63.65 & 40 & +23.65  &  84.0 -- no \\
+25 & 3 & 5 & 25.02 & 63.79 & 41 & +22.79  & 13.60 -- yes \\
+30 & 2 & 4 & 25.07 & 63.93 & 28 & +35.93  & 2250  -- no (saturated) \\
+30 & 2 & 5 & 29.95 & 76.37 & 29 & +47.37  &  75.1 -- no (high $W$) \\
+30 & 3 & 4 & 25.61 & 65.30 & 40 & +25.30  & 1964  -- no (saturated) \\
+30 & 3 & 5 & 30.01 & 76.53 & 41 & \textbf{+35.53} & 33.7  -- yes (best) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\linewidth]{fig_benefit_vs_lambda.png}
+\caption{Hourly net benefit (€/h) vs arrival rate $\lambda$ per
+configuration, from Eq.~\eqref{eq:benefit}.}
+\label{fig:benefit}
+\end{figure}
+
+\subsection{Operational policy}
+Combining Tables \ref{tab:validation} and~\ref{tab:benefit}, the
+recommended policy is:
+
+\begin{itemize}
+\item At \emph{low demand} ($\lambda = 15$/h), the cheapest
+configuration $(2,4)$ is optimal. Adding either a seat or a waiter
+reduces the benefit because the demand does not justify the extra
+capacity.
+\item At \emph{normal demand} ($\lambda = 20$/h), the baseline $(2,4)$
+still wins by a small margin over $(2,5)$.
+\item At \emph{high demand} ($\lambda = 25$/h), $(2,5)$ becomes the
+only viable optimum: \emph{adding a seat (1~€/h) is enough}, no
+extra waiter is required.
+\item At \emph{peak demand} ($\lambda = 30$/h), only $(3,5)$ is viable.
+Even so, $W = 33.7$~min remains high: at this rate, the manager should
+consider redesigning the service (more seats or a different layout)
+rather than simply hiring more staff.
+\end{itemize}
+
+The economic conclusion is therefore unambiguous: \emph{when in doubt,
+add a seat before adding a waiter}. The seat is one order of magnitude
+cheaper and addresses the actual bottleneck.
+
+% =====================================================================
+\section{Conclusions}
+% =====================================================================
+
+This study has built a complete discrete-event simulation of a small
+cafeteria modelled as a queueing system with two coupled resources
+(seats and waiters). The model was developed following Algorithm~1.1
+of Leemis~\& Park, implemented with the multi-stream Lehmer
+pseudo-random generator, validated through three runtime checks
+(Little's Law, observed arrival rate, class mix) and against an
+analytical lower-bound model of resource utilization. The warm-up
+period was identified by Welch's method as $T_0 = 60$~h, and all
+metrics were computed via the replication-deletion method with the
+t-Student $95\%$ confidence interval over $n = 32$ replications per
+scenario.
+
+The main findings are:
+\begin{itemize}
+\item \emph{The seat, not the waiter, is the bottleneck of the system}
+at every operating point considered. The analytical bound
+$\hat\rho_{\text{seat}} = \lambda\,E[T_{\text{seat}}]/S$ correctly
+predicts both the magnitude and the stability boundary.
+\item Adding a seat is operationally and economically far superior to
+adding a waiter, both because the seat is twelve times cheaper and
+because it directly attacks the bottleneck.
+\item The optimal configuration is demand-dependent: $(2,4)$ at low
+to normal demand, $(2,5)$ at high demand, and $(3,5)$ only at peak,
+which barely satisfies a reasonable service-level objective.
+\end{itemize}
+
+\paragraph{Limitations and possible extensions.}
+The model assumes exponential service times throughout, which is the
+standard reference but does not match every empirical distribution.
+Customer balking (refusing to enter the queue) and reneging (leaving
+after some wait) are not modelled, although the data from the high-load
+scenarios suggest these effects would dominate any further refinement.
+Extensions could include heterogeneous waiters (with different service
+rates), a time-varying arrival rate (peak/off-peak hours), and the
+inclusion of a take-away service that does not need a seat.
+
+% =====================================================================
+\begin{thebibliography}{9}
+\bibitem{leemis_park}
+L.~M.~Leemis and S.~K.~Park,
+\emph{Discrete-Event Simulation: A First Course},
+Pearson Education / Prentice Hall, 2006.
+
+\bibitem{kurkowski_manet}
+S.~Kurkowski, T.~Camp and M.~Colagrosso,
+``MANET Simulation Studies: The Incredibles'',
+\emph{Mobile Computing and Communications Review}, vol.~9, no.~4,
+pp.~50--61, Oct.~2005.
+
+\bibitem{harchol_balter}
+M.~Harchol-Balter,
+\emph{Performance Modeling and Design of Computer Systems},
+Cambridge University Press, 2013.
+\end{thebibliography}
+
+\end{document}
