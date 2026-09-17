@@ -48,9 +48,12 @@ When demand grows, should the manager hire an extra waiter or buy an extra seat?
 - **Docs:** LaTeX (article + Beamer)
 
 ## Repository structure
-├── src/ Simulator (C) and analysis scripts (Python)
-├── report/ Full technical report (relazione.pdf) and LaTeX source
-└── presentation/ Defense slides (presentation.pdf) and LaTeX source
+
+```text
+├── src/            Simulator (C) and analysis scripts (Python)
+├── report/         Full technical report (relazione.pdf) and LaTeX source
+└── presentation/   Defense slides (presentation.pdf) and LaTeX source
+```
 
 ## How to reproduce
 
