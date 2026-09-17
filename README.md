@@ -2,7 +2,6 @@
 
 [![Language](https://img.shields.io/badge/language-C%20%2B%20Python-blue)]()
 [![Course](https://img.shields.io/badge/course-Performance%20Modeling-red)]()
-[![Grade](https://img.shields.io/badge/grade-27%2F30-brightgreen)]()
 
 Discrete-event simulation of a cafeteria with coupled resources (seats and waiters),
 built as the final project for **Performance Modeling of Computer Systems and Networks**
